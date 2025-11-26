@@ -1,0 +1,7 @@
+// Resource file for sshfs-ctx.dll
+// Embeds the context menu icon
+
+#define IDI_MENUICON 101
+
+IDI_MENUICON ICON "icon.ico"
+

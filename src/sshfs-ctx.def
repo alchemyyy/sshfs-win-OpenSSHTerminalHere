@@ -1,0 +1,11 @@
+; sshfs-ctx.def
+; Export definitions for SSHFS-Win shell extension DLL
+
+LIBRARY sshfs-ctx
+EXPORTS
+    DllMain             PRIVATE
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE
+
