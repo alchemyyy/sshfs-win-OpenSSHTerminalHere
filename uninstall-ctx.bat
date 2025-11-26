@@ -69,10 +69,13 @@ if exist "%TARGET_DIR%\sshfs-ctx.dll" (
     regsvr32 /s /u "%TARGET_DIR%\sshfs-ctx.dll"
     call :echoquiet   Shell extension unregistered
 ) else (
-    :: Manual cleanup if DLL doesn't exist
+    :: Manual cleanup if DLL doesn't exist (both old and new registry key names)
     reg delete "HKCR\Directory\Background\shellex\ContextMenuHandlers\SSHFSWin" /f >nul 2>&1
     reg delete "HKCR\Directory\shellex\ContextMenuHandlers\SSHFSWin" /f >nul 2>&1
     reg delete "HKCR\Drive\shellex\ContextMenuHandlers\SSHFSWin" /f >nul 2>&1
+    reg delete "HKCR\Directory\Background\shellex\ContextMenuHandlers\000-SSHFSWin" /f >nul 2>&1
+    reg delete "HKCR\Directory\shellex\ContextMenuHandlers\000-SSHFSWin" /f >nul 2>&1
+    reg delete "HKCR\Drive\shellex\ContextMenuHandlers\000-SSHFSWin" /f >nul 2>&1
     reg delete "HKCR\CLSID\{7B3F4E8A-1C2D-4E5F-9A8B-0C1D2E3F4A5B}" /f >nul 2>&1
     reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved" /v "{7B3F4E8A-1C2D-4E5F-9A8B-0C1D2E3F4A5B}" /f >nul 2>&1
     call :echoquiet   Registry entries cleaned up

@@ -95,7 +95,7 @@ echo.
 echo Using: MSVC
 echo.
 
-echo [1/3] Compiling resources...
+echo [1/4] Compiling resources...
 rc.exe /nologo /fo "%OUT_DIR%\sshfs-ctx.res" "%SRC_DIR%\sshfs-ctx.rc"
 if errorlevel 1 (
     echo ERROR: Failed to compile resources
@@ -103,7 +103,7 @@ if errorlevel 1 (
 )
 echo   OK: sshfs-ctx.res
 
-echo [2/3] Building sshfs-ctx.dll...
+echo [2/4] Building sshfs-ctx.dll...
 cl.exe /nologo /O2 /LD /W3 /DUNICODE /D_UNICODE ^
     "%SRC_DIR%\sshfs-ctx.c" ^
     "%OUT_DIR%\sshfs-ctx.res" ^
@@ -116,7 +116,7 @@ if errorlevel 1 (
 )
 echo   OK: sshfs-ctx.dll
 
-echo [3/3] Building sshfs-ssh.exe...
+echo [3/4] Building sshfs-ssh.exe...
 cl.exe /nologo /O2 /W3 /DUNICODE /D_UNICODE ^
     "%SRC_DIR%\sshfs-ssh.c" ^
     /Fe:"%OUT_DIR%\sshfs-ssh.exe" ^
@@ -126,6 +126,17 @@ if errorlevel 1 (
     exit /b 1
 )
 echo   OK: sshfs-ssh.exe
+
+echo [4/4] Building sshfs-ssh-launcher.exe...
+cl.exe /nologo /O2 /W3 /DUNICODE /D_UNICODE ^
+    "%SRC_DIR%\sshfs-ssh-launcher.c" ^
+    /Fe:"%OUT_DIR%\sshfs-ssh-launcher.exe" ^
+    /link /SUBSYSTEM:CONSOLE
+if errorlevel 1 (
+    echo ERROR: Failed to build sshfs-ssh-launcher.exe
+    exit /b 1
+)
+echo   OK: sshfs-ssh-launcher.exe
 
 :: Clean up temp files
 del /q "%OUT_DIR%\*.obj" 2>nul
@@ -142,7 +153,7 @@ echo.
 echo Using: MinGW-w64
 echo.
 
-echo [1/3] Compiling resources...
+echo [1/4] Compiling resources...
 "%MINGW_PATH%\windres.exe" -i "%SRC_DIR%\sshfs-ctx.rc" -o "%OUT_DIR%\sshfs-ctx.res.o"
 if errorlevel 1 (
     echo ERROR: Failed to compile resources
@@ -150,7 +161,7 @@ if errorlevel 1 (
 )
 echo   OK: sshfs-ctx.res.o
 
-echo [2/3] Building sshfs-ctx.dll...
+echo [2/4] Building sshfs-ctx.dll...
 "%MINGW_PATH%\gcc.exe" -shared -O2 -Wall -DUNICODE -D_UNICODE ^
     -o "%OUT_DIR%\sshfs-ctx.dll" ^
     "%SRC_DIR%\sshfs-ctx.c" ^
@@ -164,7 +175,7 @@ if errorlevel 1 (
 )
 echo   OK: sshfs-ctx.dll
 
-echo [3/3] Building sshfs-ssh.exe...
+echo [3/4] Building sshfs-ssh.exe...
 "%MINGW_PATH%\gcc.exe" -O2 -Wall -DUNICODE -D_UNICODE ^
     -o "%OUT_DIR%\sshfs-ssh.exe" ^
     "%SRC_DIR%\sshfs-ssh.c" ^
@@ -175,6 +186,17 @@ if errorlevel 1 (
     exit /b 1
 )
 echo   OK: sshfs-ssh.exe
+
+echo [4/4] Building sshfs-ssh-launcher.exe...
+"%MINGW_PATH%\gcc.exe" -O2 -Wall -DUNICODE -D_UNICODE ^
+    -o "%OUT_DIR%\sshfs-ssh-launcher.exe" ^
+    "%SRC_DIR%\sshfs-ssh-launcher.c" ^
+    -municode -Wl,--subsystem,console -static
+if errorlevel 1 (
+    echo ERROR: Failed to build sshfs-ssh-launcher.exe
+    exit /b 1
+)
+echo   OK: sshfs-ssh-launcher.exe
 
 :: Clean up temp files
 del /q "%OUT_DIR%\*.res.o" 2>nul
@@ -195,7 +217,7 @@ set "SRC_PATH_CYG=%SRC_PATH_CYG:\=/%"
 set "OUT_PATH_CYG=%OUT_DIR:C:\=/cygdrive/c/%"
 set "OUT_PATH_CYG=%OUT_PATH_CYG:\=/%"
 
-echo [1/3] Compiling resources...
+echo [1/4] Compiling resources...
 C:\cygwin64\bin\bash.exe -l -c "x86_64-w64-mingw32-windres -i '%SRC_PATH_CYG%/sshfs-ctx.rc' -o '%OUT_PATH_CYG%/sshfs-ctx.res.o'"
 if errorlevel 1 (
     echo ERROR: Failed to compile resources
@@ -207,7 +229,7 @@ if not exist "%OUT_DIR%\sshfs-ctx.res.o" (
 )
 echo   OK: sshfs-ctx.res.o
 
-echo [2/3] Building sshfs-ctx.dll...
+echo [2/4] Building sshfs-ctx.dll...
 C:\cygwin64\bin\bash.exe -l -c "x86_64-w64-mingw32-gcc -shared -O2 -Wall -DUNICODE -D_UNICODE -o '%OUT_PATH_CYG%/sshfs-ctx.dll' '%SRC_PATH_CYG%/sshfs-ctx.c' '%OUT_PATH_CYG%/sshfs-ctx.res.o' '%SRC_PATH_CYG%/sshfs-ctx.def' -lole32 -lshell32 -lshlwapi -ladvapi32 -lmpr -luuid -lgdi32 -Wl,--subsystem,windows -static"
 if errorlevel 1 (
     echo ERROR: Failed to build sshfs-ctx.dll
@@ -219,7 +241,7 @@ if not exist "%OUT_DIR%\sshfs-ctx.dll" (
 )
 echo   OK: sshfs-ctx.dll
 
-echo [3/3] Building sshfs-ssh.exe...
+echo [3/4] Building sshfs-ssh.exe...
 C:\cygwin64\bin\bash.exe -l -c "x86_64-w64-mingw32-gcc -O2 -Wall -DUNICODE -D_UNICODE -o '%OUT_PATH_CYG%/sshfs-ssh.exe' '%SRC_PATH_CYG%/sshfs-ssh.c' -ladvapi32 -lmpr -lshell32 -lshlwapi -luser32 -lcredui -municode -Wl,--subsystem,windows -static"
 if errorlevel 1 (
     echo ERROR: Failed to build sshfs-ssh.exe
@@ -230,6 +252,18 @@ if not exist "%OUT_DIR%\sshfs-ssh.exe" (
     exit /b 1
 )
 echo   OK: sshfs-ssh.exe
+
+echo [4/4] Building sshfs-ssh-launcher.exe...
+C:\cygwin64\bin\bash.exe -l -c "x86_64-w64-mingw32-gcc -O2 -Wall -DUNICODE -D_UNICODE -o '%OUT_PATH_CYG%/sshfs-ssh-launcher.exe' '%SRC_PATH_CYG%/sshfs-ssh-launcher.c' -municode -Wl,--subsystem,console -static"
+if errorlevel 1 (
+    echo ERROR: Failed to build sshfs-ssh-launcher.exe
+    exit /b 1
+)
+if not exist "%OUT_DIR%\sshfs-ssh-launcher.exe" (
+    echo ERROR: sshfs-ssh-launcher.exe was not created
+    exit /b 1
+)
+echo   OK: sshfs-ssh-launcher.exe
 
 :: Clean up temp files
 del /q "%OUT_DIR%\*.res.o" 2>nul
@@ -242,8 +276,9 @@ echo   Build Complete
 echo ============================================
 echo.
 echo Output:
-echo   %OUT_DIR%\sshfs-ctx.dll  - Shell extension (with embedded icon)
-echo   %OUT_DIR%\sshfs-ssh.exe  - SSH launcher
+echo   %OUT_DIR%\sshfs-ctx.dll          - Shell extension (with embedded icon)
+echo   %OUT_DIR%\sshfs-ssh.exe          - SSH terminal invoker
+echo   %OUT_DIR%\sshfs-ssh-launcher.exe - ConPTY-based SSH launcher
 echo.
 echo These are native Windows binaries (no Cygwin runtime deps).
 echo Run install-ctx.bat as Administrator to install.

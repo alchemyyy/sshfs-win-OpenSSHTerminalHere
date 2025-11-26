@@ -94,11 +94,7 @@ if defined SRC_DIR (
     if exist "%TARGET_DIR%" (
         copy /Y "%SRC_DIR%\sshfs-ctx.dll" "%TARGET_DIR%\" >nul 2>&1
         copy /Y "%SRC_DIR%\sshfs-ssh.exe" "%TARGET_DIR%\" >nul 2>&1
-        
-        if exist "%SCRIPT_DIR%plink.exe" (
-            copy /Y "%SCRIPT_DIR%plink.exe" "%TARGET_DIR%\" >nul 2>&1
-            call :echoquiet   plink.exe copied
-        )
+        copy /Y "%SRC_DIR%\sshfs-ssh-launcher.exe" "%TARGET_DIR%\" >nul 2>&1
         call :echoquiet   Files copied
     ) else (
         call :echoquiet   Target directory does not exist: %TARGET_DIR%

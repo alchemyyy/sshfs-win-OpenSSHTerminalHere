@@ -362,9 +362,9 @@ static void BuildFullRemotePath(
 }
 
 /**
- * Get path to plink.exe (bundled with sshfs-ctx)
+ * Get path to sshfs-ssh-launcher.exe (bundled with sshfs-ctx)
  */
-static BOOL GetPlinkPath(LPWSTR pszPath, DWORD cchPath)
+static BOOL GetLauncherPath(LPWSTR pszPath, DWORD cchPath)
 {
     WCHAR szModulePath[MAX_PATH];
     
@@ -375,7 +375,7 @@ static BOOL GetPlinkPath(LPWSTR pszPath, DWORD cchPath)
         if (pLastSlash)
         {
             *pLastSlash = L'\0';
-            StringCchPrintfW(pszPath, cchPath, L"%s\\plink.exe", szModulePath);
+            StringCchPrintfW(pszPath, cchPath, L"%s\\sshfs-ssh-launcher.exe", szModulePath);
             if (GetFileAttributesW(pszPath) != INVALID_FILE_ATTRIBUTES)
                 return TRUE;
         }
@@ -385,6 +385,7 @@ static BOOL GetPlinkPath(LPWSTR pszPath, DWORD cchPath)
 }
 
 /**
+<<<<<<< Updated upstream
  * Get the user's SSH identity file path (for key-based auth)
  */
 static BOOL GetSSHIdentityFile(LPWSTR pszPath, DWORD cchPath)
@@ -504,6 +505,15 @@ static BOOL CreatePlinkLaunchScript(
 
 /**
  * Launch SSH terminal using plink
+=======
+ * Launch SSH terminal using Windows OpenSSH via ConPTY launcher
+ * 
+ * Uses sshfs-ssh-launcher.exe which:
+ * - Creates a ConPTY (pseudo-console) for proper terminal emulation
+ * - Launches ssh.exe attached to the ConPTY
+ * - Handles password prompt if credentials are stored
+ * - Properly handles Ctrl+C and all terminal signals
+>>>>>>> Stashed changes
  */
 static BOOL LaunchSSHTerminal(
     LPCWSTR pszUser,
@@ -512,71 +522,74 @@ static BOOL LaunchSSHTerminal(
     LPCWSTR pszRemotePath,
     MountType mountType)
 {
-    WCHAR szPlinkPath[MAX_PATH];
-    WCHAR szIdentityFile[MAX_PATH] = {0};
+    WCHAR szLauncherPath[MAX_PATH];
     WCHAR szPassword[256] = {0};
-    WCHAR szScriptPath[MAX_PATH];
-    WCHAR szCmdLine[MAX_PATH * 2];
+    WCHAR szCmdLine[MAX_PATH * 8];
+    WCHAR szTarget[512];
+    WCHAR szRemoteCmd[MAX_PATH * 2];
     STARTUPINFOW si = {0};
     PROCESS_INFORMATION pi = {0};
     BOOL bResult;
     
-    /* Find plink.exe */
-    if (!GetPlinkPath(szPlinkPath, MAX_PATH))
+    /* Find the launcher */
+    if (!GetLauncherPath(szLauncherPath, MAX_PATH))
     {
         MessageBoxW(NULL, 
-            L"Could not find plink.exe.\n\n"
-            L"Please ensure plink.exe is in the same directory as sshfs-ssh.exe.",
+            L"Could not find sshfs-ssh-launcher.exe.\n\n"
+            L"Please ensure sshfs-ssh-launcher.exe is in the same directory as sshfs-ssh.exe.",
             L"SSHFS-Win - SSH Terminal", MB_OK | MB_ICONERROR);
         return FALSE;
     }
 
-    /* For key-based mounts, try to use identity file */
-    if (mountType == MOUNT_TYPE_KEY || mountType == MOUNT_TYPE_KEY_ROOT)
+    /* For password-based mounts, try to read stored credential */
+    if (mountType == MOUNT_TYPE_PASSWORD || mountType == MOUNT_TYPE_PASSWORD_ROOT)
     {
-        GetSSHIdentityFile(szIdentityFile, MAX_PATH);
+        GetStoredPassword(pszUser, pszHost, pszPort, szPassword, 256);
+    }
+    /* For key-based mounts, OpenSSH will use ~/.ssh/ keys automatically */
+
+    /* Build target: user@host or user@host:port */
+    if (pszPort && pszPort[0])
+        StringCchPrintfW(szTarget, 512, L"%s@%s:%s", pszUser, pszHost, pszPort);
+    else
+        StringCchPrintfW(szTarget, 512, L"%s@%s", pszUser, pszHost);
+
+    /* Build remote command: cd to path and start shell */
+    if (wcscmp(pszRemotePath, L"/") == 0)
+    {
+        StringCchCopyW(szRemoteCmd, MAX_PATH * 2, L"cd / && exec $SHELL -l");
     }
     else
     {
-        /* For password-based mounts, try to read stored credential */
-        GetStoredPassword(pszUser, pszHost, pszPort, szPassword, 256);
+        /* Use double quotes for path to handle spaces and $HOME expansion */
+        StringCchPrintfW(szRemoteCmd, MAX_PATH * 2, L"cd \\\"%s\\\" && exec $SHELL -l", pszRemotePath);
     }
 
-    /* Create launch script */
-    if (!CreatePlinkLaunchScript(szPlinkPath, pszUser, pszHost, pszPort, 
-        pszRemotePath, szIdentityFile, szPassword, szScriptPath, MAX_PATH))
+    /* Build command line for launcher:
+     * sshfs-ssh-launcher.exe user@host[:port] [password] ["remote_command"]
+     */
+    if (szPassword[0])
     {
-        MessageBoxW(NULL, L"Failed to create launch script.", 
-            L"SSHFS-Win - SSH Terminal", MB_OK | MB_ICONERROR);
-        return FALSE;
+        StringCchPrintfW(szCmdLine, MAX_PATH * 8,
+            L"\"%s\" \"%s\" \"%s\" \"%s\"",
+            szLauncherPath, szTarget, szPassword, szRemoteCmd);
+    }
+    else
+    {
+        /* No password - pass empty string */
+        StringCchPrintfW(szCmdLine, MAX_PATH * 8,
+            L"\"%s\" \"%s\" \"\" \"%s\"",
+            szLauncherPath, szTarget, szRemoteCmd);
     }
     
     /* Clear password from memory */
     SecureZeroMemory(szPassword, sizeof(szPassword));
 
-    /* Try Windows Terminal first */
-    WCHAR szWTPath[MAX_PATH];
-    BOOL useWT = FALSE;
-    
-    if (GetEnvironmentVariableW(L"LOCALAPPDATA", szWTPath, MAX_PATH))
-    {
-        StringCchCatW(szWTPath, MAX_PATH, L"\\Microsoft\\WindowsApps\\wt.exe");
-        if (GetFileAttributesW(szWTPath) != INVALID_FILE_ATTRIBUTES)
-            useWT = TRUE;
-    }
+#if DEBUG_SSH_CMD
+    MessageBoxW(NULL, szCmdLine, L"SSH Command", MB_OK);
+#endif
 
-    if (useWT)
-    {
-        StringCchPrintfW(szCmdLine, MAX_PATH * 2,
-            L"\"%s\" new-tab --title \"SSH: %s@%s\" -- cmd /c \"%s\"",
-            szWTPath, pszUser, pszHost, szScriptPath);
-    }
-    else
-    {
-        StringCchPrintfW(szCmdLine, MAX_PATH * 2,
-            L"cmd.exe /c \"%s\"", szScriptPath);
-    }
-    
+    /* Launch the ConPTY-based SSH launcher in a new console */
     si.cb = sizeof(si);
     bResult = CreateProcessW(NULL, szCmdLine, NULL, NULL, FALSE,
         CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi);
@@ -589,8 +602,10 @@ static BOOL LaunchSSHTerminal(
     }
 
     DWORD dwError = GetLastError();
-    WCHAR szError[256];
-    StringCchPrintfW(szError, 256, L"Failed to launch SSH terminal.\nError code: %lu", dwError);
+    WCHAR szError[512];
+    StringCchPrintfW(szError, 512, 
+        L"Failed to launch SSH terminal.\nError code: %lu\n\nCommand: %s", 
+        dwError, szCmdLine);
     MessageBoxW(NULL, szError, L"SSHFS-Win - SSH Terminal", MB_OK | MB_ICONERROR);
 
     return FALSE;
