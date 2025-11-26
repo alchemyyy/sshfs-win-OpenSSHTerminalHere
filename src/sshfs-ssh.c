@@ -412,7 +412,12 @@ static BOOL GetSSHIdentityFile(LPWSTR pszPath, DWORD cchPath)
 }
 
 /**
- * Create batch script to launch plink
+ * Create batch script to launch plink using start /b /wait
+ * 
+ * The key to avoiding "Terminate batch job (Y/N)?" is using "start /b /wait":
+ * - /b runs plink in the same console window (no new window)
+ * - /wait makes the batch wait for plink to finish
+ * - Because plink becomes the foreground process, Ctrl+C goes to plink, not the batch
  */
 static BOOL CreatePlinkLaunchScript(
     LPCWSTR pszPlinkPath,
@@ -449,12 +454,7 @@ static BOOL CreatePlinkLaunchScript(
     if (pszPassword && pszPassword[0])
         StringCchPrintfW(szPasswordOpt, MAX_PATH, L"-pw \"%s\" ", pszPassword);
     
-    /* Build plink command
-     * plink -no-antispoof -t user@host "cd /path; exec bash --login"
-     * -no-antispoof skips the "Access granted. Press Return" prompt
-     * Use semicolon instead of && for better compatibility
-     * Special case: if path is just "/", use cd / without quotes
-     */
+    /* Build cd command for remote shell */
     WCHAR szCdCommand[MAX_PATH * 2];
     if (wcscmp(pszRemotePath, L"/") == 0)
     {
@@ -462,14 +462,16 @@ static BOOL CreatePlinkLaunchScript(
     }
     else
     {
-        /* Use double quotes to allow $HOME expansion */
         StringCchPrintfW(szCdCommand, MAX_PATH * 2, L"cd \\\"%s\\\"", pszRemotePath);
     }
     
+    /* Build batch script using "start /b /wait" to make plink the foreground process
+     * This ensures Ctrl+C goes to plink (and thus the remote shell) instead of
+     * being caught by cmd.exe's batch processor */
     StringCchPrintfW(szContent, MAX_PATH * 4,
         L"@echo off\r\n"
         L"title SSH: %s@%s - %s\r\n"
-        L"\"%s\" %s%s%s-no-antispoof -t %s@%s \"%s; exec bash --login\"\r\n"
+        L"start /b /wait \"\" \"%s\" %s%s%s-no-antispoof -t %s@%s \"%s; exec bash --login\"\r\n"
         L"if errorlevel 1 pause\r\n",
         pszUser, pszHost, pszRemotePath,
         pszPlinkPath, szPasswordOpt, szIdentityOpt, szPortOpt, 
