@@ -369,7 +369,8 @@ static HRESULT STDMETHODCALLTYPE ContextMenu_QueryContextMenu(
         mii.hbmpItem = hBmp;
     }
 
-    InsertMenuItemW(hmenu, indexMenu, TRUE, &mii);
+    /* Insert at position 0 to place at top of context menu */
+    InsertMenuItemW(hmenu, 0, TRUE, &mii);
 
     return MAKE_HRESULT(SEVERITY_SUCCESS, 0, IDM_OPENSSH + 1);
 }
@@ -632,9 +633,17 @@ STDAPI DllRegisterServer(void)
         RegCloseKey(hKey);
     }
 
-    /* Register for Directory background */
-    StringCchPrintfW(szSubKey, 256, 
+    /* Remove old registry keys (upgrade from previous versions) */
+    RegDeleteKeyW(HKEY_CLASSES_ROOT,
         L"Directory\\Background\\shellex\\ContextMenuHandlers\\SSHFSWin");
+    RegDeleteKeyW(HKEY_CLASSES_ROOT,
+        L"Directory\\shellex\\ContextMenuHandlers\\SSHFSWin");
+    RegDeleteKeyW(HKEY_CLASSES_ROOT,
+        L"Drive\\shellex\\ContextMenuHandlers\\SSHFSWin");
+
+    /* Register for Directory background - use 000- prefix to appear at top of menu */
+    StringCchPrintfW(szSubKey, 256, 
+        L"Directory\\Background\\shellex\\ContextMenuHandlers\\000-SSHFSWin");
     if (RegCreateKeyExW(HKEY_CLASSES_ROOT, szSubKey, 0, NULL, 0,
         KEY_WRITE, NULL, &hKey, &dwDisp) == ERROR_SUCCESS)
     {
@@ -645,7 +654,7 @@ STDAPI DllRegisterServer(void)
 
     /* Register for Directory (folder selection) */
     StringCchPrintfW(szSubKey, 256,
-        L"Directory\\shellex\\ContextMenuHandlers\\SSHFSWin");
+        L"Directory\\shellex\\ContextMenuHandlers\\000-SSHFSWin");
     if (RegCreateKeyExW(HKEY_CLASSES_ROOT, szSubKey, 0, NULL, 0,
         KEY_WRITE, NULL, &hKey, &dwDisp) == ERROR_SUCCESS)
     {
@@ -656,7 +665,7 @@ STDAPI DllRegisterServer(void)
 
     /* Register for Drive */
     StringCchPrintfW(szSubKey, 256,
-        L"Drive\\shellex\\ContextMenuHandlers\\SSHFSWin");
+        L"Drive\\shellex\\ContextMenuHandlers\\000-SSHFSWin");
     if (RegCreateKeyExW(HKEY_CLASSES_ROOT, szSubKey, 0, NULL, 0,
         KEY_WRITE, NULL, &hKey, &dwDisp) == ERROR_SUCCESS)
     {
@@ -688,13 +697,19 @@ STDAPI DllUnregisterServer(void)
     WCHAR szSubKey[256];
     HKEY hKey;
 
-    /* Remove context menu handler registrations */
+    /* Remove context menu handler registrations (both old and new key names) */
     RegDeleteKeyW(HKEY_CLASSES_ROOT,
         L"Directory\\Background\\shellex\\ContextMenuHandlers\\SSHFSWin");
     RegDeleteKeyW(HKEY_CLASSES_ROOT,
         L"Directory\\shellex\\ContextMenuHandlers\\SSHFSWin");
     RegDeleteKeyW(HKEY_CLASSES_ROOT,
         L"Drive\\shellex\\ContextMenuHandlers\\SSHFSWin");
+    RegDeleteKeyW(HKEY_CLASSES_ROOT,
+        L"Directory\\Background\\shellex\\ContextMenuHandlers\\000-SSHFSWin");
+    RegDeleteKeyW(HKEY_CLASSES_ROOT,
+        L"Directory\\shellex\\ContextMenuHandlers\\000-SSHFSWin");
+    RegDeleteKeyW(HKEY_CLASSES_ROOT,
+        L"Drive\\shellex\\ContextMenuHandlers\\000-SSHFSWin");
 
     /* Remove CLSID registration */
     StringCchPrintfW(szSubKey, 256, L"CLSID\\%s\\InProcServer32", szClsid);
