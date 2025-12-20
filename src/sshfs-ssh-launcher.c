@@ -4,10 +4,10 @@
  * SSH launcher using Windows ConPTY (Pseudo Console) and built-in OpenSSH.
  * ConPTY properly handles Ctrl+C, terminal resize, and all terminal signals.
  *
- * Usage: sshfs-ssh-launcher.exe user@host[:port] [password] ["remote_command"]
+ * Usage: sshfs-ssh-launcher.exe user@host[:port] pipe_handle ["remote_command"]
  *
- * If password is provided and non-empty, it will be automatically sent when
- * the SSH password prompt appears.
+ * Password is read from inherited pipe handle (not command line) for security.
+ * The pipe_handle is a numeric handle value. Pass 0 for no password.
  */
 
 #ifndef UNICODE
@@ -21,6 +21,7 @@
 #include <strsafe.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <conio.h>
 
 #define BUFFER_SIZE 4096
@@ -149,18 +150,28 @@ int wmain(int argc, wchar_t *argv[])
     DWORD bytesRead, bytesWritten;
     BOOL foundPrompt = FALSE;
 
-    if (argc < 2)
+    if (argc < 3)
     {
-        fwprintf(stderr, L"Usage: %s user@host[:port] [password] [\"remote_command\"]\n", argv[0]);
+        fwprintf(stderr, L"Usage: %s user@host[:port] pipe_handle [\"remote_command\"]\n", argv[0]);
         return 1;
     }
 
     /* Parse arguments */
     StringCchCopyW(szTarget, 512, argv[1]);
-    
-    if (argc >= 3 && argv[2][0] != L'\0')
-        StringCchCopyW(szPassword, 256, argv[2]);
-    
+
+    /* Read password from inherited pipe handle (secure - not visible in process list) */
+    HANDLE hPipeRead = (HANDLE)(ULONG_PTR)_wcstoui64(argv[2], NULL, 10);
+    if (hPipeRead != NULL && hPipeRead != INVALID_HANDLE_VALUE)
+    {
+        DWORD pipeBytes;
+        if (ReadFile(hPipeRead, szPasswordA, 255, &pipeBytes, NULL) && pipeBytes > 0)
+        {
+            szPasswordA[pipeBytes] = '\0';
+            MultiByteToWideChar(CP_UTF8, 0, szPasswordA, -1, szPassword, 256);
+        }
+        CloseHandle(hPipeRead);
+    }
+
     if (argc >= 4)
         StringCchCopyW(szRemoteCmd, 1024, argv[3]);
 
@@ -283,33 +294,41 @@ int wmain(int argc, wchar_t *argv[])
         WideCharToMultiByte(CP_UTF8, 0, szPassword, -1, szPasswordA, 256, NULL, NULL);
     }
 
-    /* If password provided, wait for password prompt */
+    /* If password provided, wait for password prompt and send it */
     if (szPasswordA[0])
     {
         HANDLE hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
-        
+
         while (ReadFile(hPipeOutRead, buffer, BUFFER_SIZE - 1, &bytesRead, NULL) && bytesRead > 0)
         {
             buffer[bytesRead] = '\0';
             WriteFile(hStdout, buffer, bytesRead, &bytesWritten, NULL);
 
-            /* Check for password prompt */
-            if (!foundPrompt && (strstr(buffer, "password:") || strstr(buffer, "Password:")))
+            /* Check for password prompt (case-insensitive) */
+            if (!foundPrompt)
             {
-                foundPrompt = TRUE;
-                /* Send password */
-                char passLine[512];
-                StringCchPrintfA(passLine, 512, "%s\r", szPasswordA);
-                WriteFile(hPipeInWrite, passLine, (DWORD)strlen(passLine), &bytesWritten, NULL);
-                FlushFileBuffers(hPipeInWrite);
-                
-                /* Clear password from memory */
-                SecureZeroMemory(szPasswordA, sizeof(szPasswordA));
-                SecureZeroMemory(szPassword, sizeof(szPassword));
-                break;
+                char lowerBuf[BUFFER_SIZE];
+                for (DWORD i = 0; i <= bytesRead; i++)
+                    lowerBuf[i] = (char)tolower((unsigned char)buffer[i]);
+
+                if (strstr(lowerBuf, "password:"))
+                {
+                    foundPrompt = TRUE;
+
+                    /* Send password */
+                    char passLine[512];
+                    StringCchPrintfA(passLine, 512, "%s\n", szPasswordA);
+                    WriteFile(hPipeInWrite, passLine, (DWORD)strlen(passLine), &bytesWritten, NULL);
+
+                    /* Clear password from memory */
+                    SecureZeroMemory(szPasswordA, sizeof(szPasswordA));
+                    SecureZeroMemory(szPassword, sizeof(szPassword));
+
+                    break;
+                }
             }
-            
-            /* Check if SSH exited (e.g., key-based auth succeeded) */
+
+            /* Check if SSH exited */
             if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0)
                 break;
         }
@@ -352,7 +371,11 @@ int wmain(int argc, wchar_t *argv[])
     free(attrList);
     pClosePseudoConsole(hPC);
 
-    /* If SSH exited with error, pause */
+    /* Final cleanup - ensure password is cleared even if prompt was never detected */
+    SecureZeroMemory(szPassword, sizeof(szPassword));
+    SecureZeroMemory(szPasswordA, sizeof(szPasswordA));
+
+    /* Pause on error so user can see what happened */
     if (dwExitCode != 0)
     {
         fwprintf(stderr, L"\nSSH exited with code %lu. Press any key to close...", dwExitCode);

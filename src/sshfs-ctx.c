@@ -398,7 +398,7 @@ static HRESULT STDMETHODCALLTYPE ContextMenu_InvokeCommand(
 
     /* Build path to sshfs-ssh.exe */
     GetInstallDir(szInstallDir, MAX_PATH);
-    StringCchPrintfW(szExePath, MAX_PATH, L"%susr\\bin\\sshfs-ssh.exe", szInstallDir);
+    StringCchPrintfW(szExePath, MAX_PATH, L"%sbin\\sshfs-ssh.exe", szInstallDir);
 
     /* Build command line with quoted path */
     StringCchPrintfW(szCmdLine, MAX_PATH * 2, L"\"%s\" \"%s\"", szExePath, pExt->m_szPath);

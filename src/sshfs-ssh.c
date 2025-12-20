@@ -2,7 +2,8 @@
  * sshfs-ssh.c
  *
  * Native Windows SSH terminal launcher for SSHFS-Win
- * Uses PuTTY plink.exe for SSH connections with password support
+ * Uses Windows built-in OpenSSH via ConPTY for proper terminal emulation
+ * Supports both password and key-based authentication
  *
  * This is a native Windows program - no Cygwin dependencies
  */
@@ -33,7 +34,7 @@
 #define DEBUG_PATHS 0      /* Show UNC path parsing debug info */
 #define DEBUG_SSH_CMD 0    /* Show the final SSH command before execution */
 #define DEBUG_CRED 0       /* Show credential lookup debug info */
-#define DEBUG_PASSWORD 0  /* Show the actual password retrieved (SECURITY RISK - disable after debugging) */
+#define DEBUG_PASSWORD 0   /* Show the actual password retrieved (SECURITY RISK - disable after debugging) */
 
 /**
  * Mount type enumeration
@@ -46,7 +47,51 @@ typedef enum {
 } MountType;
 
 /**
+ * Extract password from credential blob, handling Unicode vs ANSI encoding
+ */
+static BOOL ExtractPasswordFromCredential(PCREDENTIALW pCred, LPWSTR pszPassword, DWORD cchPassword)
+{
+    if (!pCred || pCred->CredentialBlobSize == 0 || !pCred->CredentialBlob)
+        return FALSE;
+
+    DWORD blobSize = pCred->CredentialBlobSize;
+    BYTE *blob = pCred->CredentialBlob;
+
+    /* Detect if password is stored as Unicode or ANSI */
+    BOOL isUnicode = FALSE;
+    if (blobSize >= 4 && (blobSize % 2) == 0)
+    {
+        if (blob[1] == 0 && blob[3] == 0)
+            isUnicode = TRUE;
+    }
+
+    if (isUnicode)
+    {
+        DWORD charCount = blobSize / sizeof(WCHAR);
+        if (charCount < cchPassword)
+        {
+            memcpy(pszPassword, blob, blobSize);
+            pszPassword[charCount] = L'\0';
+            return TRUE;
+        }
+    }
+    else
+    {
+        int result = MultiByteToWideChar(CP_ACP, 0,
+            (LPCCH)blob, blobSize,
+            pszPassword, cchPassword - 1);
+        if (result > 0)
+        {
+            pszPassword[result] = L'\0';
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/**
  * Try to read password from Windows Credential Manager
+ * First tries exact target names, then enumerates all credentials to find a match
  */
 static BOOL GetStoredPassword(
     LPCWSTR pszUser,
@@ -56,103 +101,106 @@ static BOOL GetStoredPassword(
     DWORD cchPassword)
 {
     PCREDENTIALW pCred = NULL;
+    PCREDENTIALW *pCredentials = NULL;
+    DWORD dwCount = 0;
     BOOL bFound = FALSE;
-    WCHAR szTargetNames[5][MAX_PATH];
-    int numTargets = 0;
-
-    /* Build various possible target names that WinFsp might use */
-    if (pszPort && pszPort[0])
-    {
-        StringCchPrintfW(szTargetNames[numTargets++], MAX_PATH, 
-            L"\\\\sshfs\\%s@%s!%s", pszUser, pszHost, pszPort);
-        StringCchPrintfW(szTargetNames[numTargets++], MAX_PATH,
-            L"\\\\sshfs.r\\%s@%s!%s", pszUser, pszHost, pszPort);
-    }
-    
-    StringCchPrintfW(szTargetNames[numTargets++], MAX_PATH,
-        L"\\\\sshfs\\%s@%s", pszUser, pszHost);
-    StringCchPrintfW(szTargetNames[numTargets++], MAX_PATH,
-        L"\\\\sshfs.r\\%s@%s", pszUser, pszHost);
-    StringCchPrintfW(szTargetNames[numTargets++], MAX_PATH,
-        L"%s@%s", pszUser, pszHost);
 
     pszPassword[0] = L'\0';
 
-    for (int i = 0; i < numTargets && !bFound; i++)
+    /* Build search pattern for user@host */
+    WCHAR szSearchPattern[512];
+    if (pszPort && pszPort[0])
+        StringCchPrintfW(szSearchPattern, 512, L"%s@%s", pszUser, pszHost);
+    else
+        StringCchPrintfW(szSearchPattern, 512, L"%s@%s", pszUser, pszHost);
+
+#if DEBUG_CRED
+    {
+        WCHAR szDebug[512];
+        StringCchPrintfW(szDebug, 512, L"Looking for credentials matching: %s", szSearchPattern);
+        MessageBoxW(NULL, szDebug, L"Debug - Credential Search", MB_OK);
+    }
+#endif
+
+    /* Enumerate ALL credentials and find one containing our user@host */
+    if (CredEnumerateW(NULL, 0, &dwCount, &pCredentials))
     {
 #if DEBUG_CRED
         {
-            WCHAR szDebug[MAX_PATH * 2];
-            StringCchPrintfW(szDebug, MAX_PATH * 2, L"Trying credential target: %s", szTargetNames[i]);
-            MessageBoxW(NULL, szDebug, L"Debug - Credential Lookup", MB_OK);
+            WCHAR szDebug[256];
+            StringCchPrintfW(szDebug, 256, L"Found %lu credentials in Credential Manager", dwCount);
+            MessageBoxW(NULL, szDebug, L"Debug - Credential Enumerate", MB_OK);
         }
 #endif
-        
-        if (CredReadW(szTargetNames[i], CRED_TYPE_GENERIC, 0, &pCred))
+
+        for (DWORD i = 0; i < dwCount && !bFound; i++)
         {
-            if (pCred->CredentialBlobSize > 0 && pCred->CredentialBlob != NULL)
+            PCREDENTIALW pc = pCredentials[i];
+            if (pc->TargetName)
             {
-                DWORD blobSize = pCred->CredentialBlobSize;
-                BYTE *blob = pCred->CredentialBlob;
-                
-                /* Detect if password is stored as Unicode or ANSI
-                 * Unicode (UTF-16 LE) typically has null bytes in odd positions for ASCII
-                 * ANSI has no null bytes until the end
-                 */
-                BOOL isUnicode = FALSE;
-                if (blobSize >= 4 && (blobSize % 2) == 0)
+                /* Check if target contains our user@host pattern (case-insensitive) */
+                WCHAR szTargetLower[MAX_PATH];
+                WCHAR szPatternLower[512];
+                StringCchCopyW(szTargetLower, MAX_PATH, pc->TargetName);
+                StringCchCopyW(szPatternLower, 512, szSearchPattern);
+                _wcslwr_s(szTargetLower, MAX_PATH);
+                _wcslwr_s(szPatternLower, 512);
+
+                if (wcsstr(szTargetLower, szPatternLower))
                 {
-                    /* Check if odd bytes are zeros (typical UTF-16 LE for ASCII) */
-                    if (blob[1] == 0 && blob[3] == 0)
-                        isUnicode = TRUE;
-                }
-                
-                if (isUnicode)
-                {
-                    /* Copy as Unicode */
-                    DWORD charCount = blobSize / sizeof(WCHAR);
-                    if (charCount < cchPassword)
+#if DEBUG_CRED
                     {
-                        memcpy(pszPassword, blob, blobSize);
-                        pszPassword[charCount] = L'\0';
+                        WCHAR szDebug[MAX_PATH * 2];
+                        StringCchPrintfW(szDebug, MAX_PATH * 2,
+                            L"MATCH FOUND!\nTarget: %s\nType: %lu",
+                            pc->TargetName, pc->Type);
+                        MessageBoxW(NULL, szDebug, L"Debug - Credential Match", MB_OK);
+                    }
+#endif
+                    if (ExtractPasswordFromCredential(pc, pszPassword, cchPassword))
+                    {
+                        bFound = TRUE;
+#if DEBUG_PASSWORD
+                        {
+                            WCHAR szDebug[512];
+                            StringCchPrintfW(szDebug, 512,
+                                L"Password extracted!\nLength: %d chars\nValue: [%s]",
+                                (int)wcslen(pszPassword), pszPassword);
+                            MessageBoxW(NULL, szDebug, L"Debug - Password", MB_OK);
+                        }
+#endif
                     }
                 }
-                else
-                {
-                    /* Convert from ANSI/UTF-8 to Unicode */
-                    int result = MultiByteToWideChar(CP_ACP, 0,
-                        (LPCCH)blob, blobSize,
-                        pszPassword, cchPassword - 1);
-                    if (result > 0)
-                        pszPassword[result] = L'\0';
-                    else
-                        pszPassword[0] = L'\0';
-                }
-                
-                bFound = TRUE;
-#if DEBUG_CRED
-                MessageBoxW(NULL, L"Credential found!", L"Debug - Credential Lookup", MB_OK);
-#endif
-#if DEBUG_PASSWORD
-                {
-                    WCHAR szDebug[512];
-                    StringCchPrintfW(szDebug, 512, 
-                        L"Password retrieved:\nLength: %d chars\nBlob size: %lu bytes\nIs Unicode: %s\nValue: [%s]", 
-                        (int)wcslen(pszPassword), blobSize, 
-                        isUnicode ? L"YES" : L"NO",
-                        pszPassword);
-                    MessageBoxW(NULL, szDebug, L"Debug - Password", MB_OK);
-                }
-#endif
             }
-            CredFree(pCred);
         }
-    }
 
 #if DEBUG_CRED
-    if (!bFound)
-        MessageBoxW(NULL, L"No stored credential found", L"Debug - Credential Lookup", MB_OK);
+        if (!bFound)
+        {
+            /* Show first few credentials for debugging */
+            WCHAR szDebug[2048] = L"No match found.\n\nFirst 10 credentials:\n";
+            for (DWORD i = 0; i < dwCount && i < 10; i++)
+            {
+                WCHAR szLine[256];
+                StringCchPrintfW(szLine, 256, L"%lu: %s\n", i, pCredentials[i]->TargetName);
+                StringCchCatW(szDebug, 2048, szLine);
+            }
+            MessageBoxW(NULL, szDebug, L"Debug - No Match", MB_OK);
+        }
 #endif
+
+        CredFree(pCredentials);
+    }
+    else
+    {
+#if DEBUG_CRED
+        {
+            WCHAR szDebug[256];
+            StringCchPrintfW(szDebug, 256, L"CredEnumerateW failed: %lu", GetLastError());
+            MessageBoxW(NULL, szDebug, L"Debug - Credential Error", MB_OK);
+        }
+#endif
+    }
 
     return bFound;
 }
@@ -313,28 +361,13 @@ static void BuildFullRemotePath(
     }
     else
     {
-        /* Home mount: use $HOME instead of ~ when there are .. components
-         * because $HOME expands inside double quotes, allowing proper path resolution
-         */
-        if (hasParentDir)
-        {
-            if (szCombined[0] == L'/')
-                StringCchPrintfW(pszFullRemotePath, cchFullRemotePath, L"$HOME%s", szCombined);
-            else if (szCombined[0])
-                StringCchPrintfW(pszFullRemotePath, cchFullRemotePath, L"$HOME/%s", szCombined);
-            else
-                StringCchCopyW(pszFullRemotePath, cchFullRemotePath, L"$HOME");
-        }
+        /* Home mount: path is relative to home directory (~) */
+        if (szCombined[0] == L'/')
+            StringCchPrintfW(pszFullRemotePath, cchFullRemotePath, L"~%s", szCombined);
+        else if (szCombined[0])
+            StringCchPrintfW(pszFullRemotePath, cchFullRemotePath, L"~/%s", szCombined);
         else
-        {
-            /* No .. components, use ~ which is simpler */
-            if (szCombined[0] == L'/')
-                StringCchPrintfW(pszFullRemotePath, cchFullRemotePath, L"~%s", szCombined);
-            else if (szCombined[0])
-                StringCchPrintfW(pszFullRemotePath, cchFullRemotePath, L"~/%s", szCombined);
-            else
-                StringCchCopyW(pszFullRemotePath, cchFullRemotePath, L"~");
-        }
+            StringCchCopyW(pszFullRemotePath, cchFullRemotePath, L"~");
     }
 
     /* Clean up double slashes */
@@ -385,135 +418,13 @@ static BOOL GetLauncherPath(LPWSTR pszPath, DWORD cchPath)
 }
 
 /**
-<<<<<<< Updated upstream
- * Get the user's SSH identity file path (for key-based auth)
- */
-static BOOL GetSSHIdentityFile(LPWSTR pszPath, DWORD cchPath)
-{
-    WCHAR szUserProfile[MAX_PATH];
-    
-    if (GetEnvironmentVariableW(L"USERPROFILE", szUserProfile, MAX_PATH))
-    {
-        /* Try PuTTY .ppk format first */
-        StringCchPrintfW(pszPath, cchPath, L"%s\\.ssh\\id_rsa.ppk", szUserProfile);
-        if (GetFileAttributesW(pszPath) != INVALID_FILE_ATTRIBUTES)
-            return TRUE;
-        
-        /* Try OpenSSH format (plink can use these too) */
-        StringCchPrintfW(pszPath, cchPath, L"%s\\.ssh\\id_rsa", szUserProfile);
-        if (GetFileAttributesW(pszPath) != INVALID_FILE_ATTRIBUTES)
-            return TRUE;
-        
-        StringCchPrintfW(pszPath, cchPath, L"%s\\.ssh\\id_ed25519", szUserProfile);
-        if (GetFileAttributesW(pszPath) != INVALID_FILE_ATTRIBUTES)
-            return TRUE;
-    }
-    
-    return FALSE;
-}
-
-/**
- * Create batch script to launch plink using start /b /wait
- * 
- * The key to avoiding "Terminate batch job (Y/N)?" is using "start /b /wait":
- * - /b runs plink in the same console window (no new window)
- * - /wait makes the batch wait for plink to finish
- * - Because plink becomes the foreground process, Ctrl+C goes to plink, not the batch
- */
-static BOOL CreatePlinkLaunchScript(
-    LPCWSTR pszPlinkPath,
-    LPCWSTR pszUser,
-    LPCWSTR pszHost,
-    LPCWSTR pszPort,
-    LPCWSTR pszRemotePath,
-    LPCWSTR pszIdentityFile,
-    LPCWSTR pszPassword,
-    LPWSTR pszScriptPath,
-    DWORD cchScriptPath)
-{
-    WCHAR szTempDir[MAX_PATH];
-    WCHAR szContent[MAX_PATH * 4];
-    HANDLE hFile;
-    DWORD dwWritten;
-    
-    if (!GetTempPathW(MAX_PATH, szTempDir))
-        return FALSE;
-    
-    StringCchPrintfW(pszScriptPath, cchScriptPath, L"%ssshfs-plink-launch.bat", szTempDir);
-    
-    /* Build options */
-    WCHAR szPortOpt[64] = {0};
-    WCHAR szIdentityOpt[MAX_PATH] = {0};
-    WCHAR szPasswordOpt[MAX_PATH] = {0};
-    
-    if (pszPort && pszPort[0])
-        StringCchPrintfW(szPortOpt, 64, L"-P %s ", pszPort);
-    
-    if (pszIdentityFile && pszIdentityFile[0])
-        StringCchPrintfW(szIdentityOpt, MAX_PATH, L"-i \"%s\" ", pszIdentityFile);
-    
-    if (pszPassword && pszPassword[0])
-        StringCchPrintfW(szPasswordOpt, MAX_PATH, L"-pw \"%s\" ", pszPassword);
-    
-    /* Build cd command for remote shell */
-    WCHAR szCdCommand[MAX_PATH * 2];
-    if (wcscmp(pszRemotePath, L"/") == 0)
-    {
-        StringCchCopyW(szCdCommand, MAX_PATH * 2, L"cd /");
-    }
-    else
-    {
-        StringCchPrintfW(szCdCommand, MAX_PATH * 2, L"cd \\\"%s\\\"", pszRemotePath);
-    }
-    
-    /* Build batch script using "start /b /wait" to make plink the foreground process
-     * This ensures Ctrl+C goes to plink (and thus the remote shell) instead of
-     * being caught by cmd.exe's batch processor */
-    StringCchPrintfW(szContent, MAX_PATH * 4,
-        L"@echo off\r\n"
-        L"title SSH: %s@%s - %s\r\n"
-        L"start /b /wait \"\" \"%s\" %s%s%s-no-antispoof -t %s@%s \"%s; exec bash --login\"\r\n"
-        L"if errorlevel 1 pause\r\n",
-        pszUser, pszHost, pszRemotePath,
-        pszPlinkPath, szPasswordOpt, szIdentityOpt, szPortOpt, 
-        pszUser, pszHost, szCdCommand);
-    
-#if DEBUG_SSH_CMD
-    {
-        WCHAR szDebugPw[512];
-        StringCchPrintfW(szDebugPw, 512, L"Password passed to plink: [%s]\nLength: %d", 
-            pszPassword ? pszPassword : L"(null)", 
-            pszPassword ? (int)wcslen(pszPassword) : 0);
-        MessageBoxW(NULL, szDebugPw, L"Debug - Password to Plink", MB_OK);
-    }
-    MessageBoxW(NULL, szContent, L"Plink Command", MB_OK);
-#endif
-
-    hFile = CreateFileW(pszScriptPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 
-        FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE)
-        return FALSE;
-    
-    char szAnsiContent[MAX_PATH * 4];
-    WideCharToMultiByte(CP_ACP, 0, szContent, -1, szAnsiContent, sizeof(szAnsiContent), NULL, NULL);
-    
-    WriteFile(hFile, szAnsiContent, (DWORD)strlen(szAnsiContent), &dwWritten, NULL);
-    CloseHandle(hFile);
-    
-    return TRUE;
-}
-
-/**
- * Launch SSH terminal using plink
-=======
  * Launch SSH terminal using Windows OpenSSH via ConPTY launcher
- * 
+ *
  * Uses sshfs-ssh-launcher.exe which:
  * - Creates a ConPTY (pseudo-console) for proper terminal emulation
  * - Launches ssh.exe attached to the ConPTY
  * - Handles password prompt if credentials are stored
  * - Properly handles Ctrl+C and all terminal signals
->>>>>>> Stashed changes
  */
 static BOOL LaunchSSHTerminal(
     LPCWSTR pszUser,
@@ -554,52 +465,131 @@ static BOOL LaunchSSHTerminal(
     else
         StringCchPrintfW(szTarget, 512, L"%s@%s", pszUser, pszHost);
 
-    /* Build remote command: cd to path and start shell */
-    if (wcscmp(pszRemotePath, L"/") == 0)
+    /* Build remote command: cd to path and start login shell */
     {
-        StringCchCopyW(szRemoteCmd, MAX_PATH * 2, L"cd / && exec $SHELL -l");
+        /* First, sanitize the path - remove any quotes that might break things */
+        WCHAR szCleanPath[MAX_PATH * 2];
+        WCHAR *src = (WCHAR*)pszRemotePath;
+        WCHAR *dst = szCleanPath;
+        while (*src && dst < szCleanPath + MAX_PATH * 2 - 1)
+        {
+            if (*src != L'"' && *src != L'\'')
+                *dst++ = *src;
+            src++;
+        }
+        *dst = L'\0';
+
+        if (szCleanPath[0] == L'\0' || wcscmp(szCleanPath, L"~") == 0)
+        {
+            StringCchCopyW(szRemoteCmd, MAX_PATH * 2, L"cd ~; exec $SHELL");
+        }
+        else if (szCleanPath[0] == L'/')
+        {
+            StringCchPrintfW(szRemoteCmd, MAX_PATH * 2, L"cd '%s'; exec $SHELL", szCleanPath);
+        }
+        else if (szCleanPath[0] == L'~')
+        {
+            /* Path like ~/something or ~/../../.. */
+            StringCchPrintfW(szRemoteCmd, MAX_PATH * 2, L"cd %s; exec $SHELL", szCleanPath);
+        }
+        else
+        {
+            StringCchPrintfW(szRemoteCmd, MAX_PATH * 2, L"cd '%s'; exec $SHELL", szCleanPath);
+        }
     }
-    else
+
+    /* Create pipe for secure password passing (not visible in process list) */
+    HANDLE hPipeRead = NULL, hPipeWrite = NULL;
+    SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};  /* Inheritable */
+
+    if (szPassword[0])
     {
-        /* Use double quotes for path to handle spaces and $HOME expansion */
-        StringCchPrintfW(szRemoteCmd, MAX_PATH * 2, L"cd \\\"%s\\\" && exec $SHELL -l", pszRemotePath);
+        if (!CreatePipe(&hPipeRead, &hPipeWrite, &sa, 0))
+        {
+            MessageBoxW(NULL, L"Failed to create password pipe", L"SSHFS-Win", MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+        /* Make write handle non-inheritable (only read handle goes to child) */
+        SetHandleInformation(hPipeWrite, HANDLE_FLAG_INHERIT, 0);
     }
 
     /* Build command line for launcher:
-     * sshfs-ssh-launcher.exe user@host[:port] [password] ["remote_command"]
+     * sshfs-ssh-launcher.exe user@host[:port] pipe_handle ["remote_command"]
+     * Password is passed via inherited pipe, not command line (security)
      */
     if (szPassword[0])
     {
-        StringCchPrintfW(szCmdLine, MAX_PATH * 8,
-            L"\"%s\" \"%s\" \"%s\" \"%s\"",
-            szLauncherPath, szTarget, szPassword, szRemoteCmd);
+        if (szRemoteCmd[0])
+            StringCchPrintfW(szCmdLine, MAX_PATH * 8,
+                L"\"%s\" \"%s\" %llu \"%s\"",
+                szLauncherPath, szTarget, (ULONGLONG)(ULONG_PTR)hPipeRead, szRemoteCmd);
+        else
+            StringCchPrintfW(szCmdLine, MAX_PATH * 8,
+                L"\"%s\" \"%s\" %llu",
+                szLauncherPath, szTarget, (ULONGLONG)(ULONG_PTR)hPipeRead);
     }
     else
     {
-        /* No password - pass empty string */
-        StringCchPrintfW(szCmdLine, MAX_PATH * 8,
-            L"\"%s\" \"%s\" \"\" \"%s\"",
-            szLauncherPath, szTarget, szRemoteCmd);
+        if (szRemoteCmd[0])
+            StringCchPrintfW(szCmdLine, MAX_PATH * 8,
+                L"\"%s\" \"%s\" 0 \"%s\"",
+                szLauncherPath, szTarget, szRemoteCmd);
+        else
+            StringCchPrintfW(szCmdLine, MAX_PATH * 8,
+                L"\"%s\" \"%s\" 0",
+                szLauncherPath, szTarget);
     }
-    
-    /* Clear password from memory */
-    SecureZeroMemory(szPassword, sizeof(szPassword));
 
 #if DEBUG_SSH_CMD
-    MessageBoxW(NULL, szCmdLine, L"SSH Command", MB_OK);
+    {
+        WCHAR szTempPath[MAX_PATH], szTempFile[MAX_PATH];
+        GetTempPathW(MAX_PATH, szTempPath);
+        StringCchPrintfW(szTempFile, MAX_PATH, L"%ssshfs-debug.txt", szTempPath);
+        HANDLE hFile = CreateFileW(szTempFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            DWORD written;
+            char szUtf8[MAX_PATH * 16];
+            WideCharToMultiByte(CP_UTF8, 0, szCmdLine, -1, szUtf8, sizeof(szUtf8), NULL, NULL);
+            WriteFile(hFile, szUtf8, (DWORD)strlen(szUtf8), &written, NULL);
+            CloseHandle(hFile);
+            ShellExecuteW(NULL, L"open", L"notepad.exe", szTempFile, NULL, SW_SHOW);
+            Sleep(500);  /* Give notepad time to open */
+        }
+    }
 #endif
 
     /* Launch the ConPTY-based SSH launcher in a new console */
     si.cb = sizeof(si);
-    bResult = CreateProcessW(NULL, szCmdLine, NULL, NULL, FALSE,
+    bResult = CreateProcessW(NULL, szCmdLine, NULL, NULL, TRUE,  /* TRUE = inherit handles */
         CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi);
 
     if (bResult)
     {
+        /* Write password to pipe, then close handles */
+        if (szPassword[0] && hPipeWrite)
+        {
+            char szPasswordA[256];
+            DWORD written;
+            WideCharToMultiByte(CP_UTF8, 0, szPassword, -1, szPasswordA, 256, NULL, NULL);
+            WriteFile(hPipeWrite, szPasswordA, (DWORD)strlen(szPasswordA) + 1, &written, NULL);
+            SecureZeroMemory(szPasswordA, sizeof(szPasswordA));
+            CloseHandle(hPipeWrite);
+        }
+        if (hPipeRead) CloseHandle(hPipeRead);  /* Close our copy, child has its own */
+
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+
+        /* Clear password from memory */
+        SecureZeroMemory(szPassword, sizeof(szPassword));
         return TRUE;
     }
+
+    /* Cleanup on failure */
+    if (hPipeRead) CloseHandle(hPipeRead);
+    if (hPipeWrite) CloseHandle(hPipeWrite);
+    SecureZeroMemory(szPassword, sizeof(szPassword));
 
     DWORD dwError = GetLastError();
     WCHAR szError[512];

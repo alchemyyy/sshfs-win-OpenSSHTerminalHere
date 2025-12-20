@@ -56,7 +56,7 @@ if "%INSTALL_DIR%"=="" (
 )
 
 set "SCRIPT_DIR=%~dp0"
-set "TARGET_DIR=%INSTALL_DIR%\usr\bin"
+set "TARGET_DIR=%INSTALL_DIR%\bin"
 
 :: Determine source directory (bin\ subdirectory or current directory)
 set "SRC_DIR="
@@ -117,7 +117,7 @@ if exist "%TARGET_DIR%\sshfs-ctx.dll" (
 ) else (
     echo   ERROR: Shell extension DLL not found at %TARGET_DIR%\sshfs-ctx.dll
     echo   Please build the context menu components first:
-    echo     build-ctx.bat
+    echo     build.bat
     exit /b 1
 )
 

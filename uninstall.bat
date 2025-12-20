@@ -55,7 +55,7 @@ if "%INSTALL_DIR%"=="" (
     if "%INSTALL_DIR%"=="" set "INSTALL_DIR=%ProgramFiles%\SSHFS-Win"
 )
 
-set "TARGET_DIR=%INSTALL_DIR%\usr\bin"
+set "TARGET_DIR=%INSTALL_DIR%\bin"
 
 :: Show header
 call :echoquiet ============================================

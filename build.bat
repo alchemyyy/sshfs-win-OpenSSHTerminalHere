@@ -281,7 +281,7 @@ echo   %OUT_DIR%\sshfs-ssh.exe          - SSH terminal invoker
 echo   %OUT_DIR%\sshfs-ssh-launcher.exe - ConPTY-based SSH launcher
 echo.
 echo These are native Windows binaries (no Cygwin runtime deps).
-echo Run install-ctx.bat as Administrator to install.
+echo Run install.bat as Administrator to install.
 echo.
 endlocal
 exit /b 0
