@@ -35,6 +35,8 @@ typedef void (WINAPI *ClosePseudoConsoleFunc)(HPCON);
 static HANDLE g_hPipeOutRead = NULL;
 static HANDLE g_hPipeInWrite = NULL;
 static HANDLE g_hProcess = NULL;
+static HPCON g_hPC = NULL;
+static ResizePseudoConsoleFunc g_pResizePseudoConsole = NULL;
 static volatile BOOL g_bRunning = TRUE;
 
 /**
@@ -69,6 +71,33 @@ static DWORD WINAPI InputThread(LPVOID param)
     while (g_bRunning && ReadFile(hStdin, buffer, BUFFER_SIZE, &bytesRead, NULL) && bytesRead > 0)
     {
         WriteFile(g_hPipeInWrite, buffer, bytesRead, &bytesWritten, NULL);
+    }
+    return 0;
+}
+
+static COORD GetConsoleSize(void);
+
+/**
+ * Thread: Monitor console size changes and resize the ConPTY
+ */
+static DWORD WINAPI ResizeThread(LPVOID param)
+{
+    COORD lastSize = GetConsoleSize();
+    COORD curSize;
+    DWORD settleCount = 0;
+
+    (void)param;
+
+    while (g_bRunning)
+    {
+        Sleep(2);
+        curSize = GetConsoleSize();
+        if (curSize.X != lastSize.X || curSize.Y != lastSize.Y)
+        {
+            lastSize = curSize;
+            if (g_hPC && g_pResizePseudoConsole)
+                g_pResizePseudoConsole(g_hPC, curSize);
+        }
     }
     return 0;
 }
@@ -122,10 +151,9 @@ int wmain(int argc, wchar_t *argv[])
     HMODULE hKernel;
     CreatePseudoConsoleFunc pCreatePseudoConsole;
     ClosePseudoConsoleFunc pClosePseudoConsole;
-    HPCON hPC = NULL;
     HANDLE hPipeInRead = NULL, hPipeInWrite = NULL;
     HANDLE hPipeOutRead = NULL, hPipeOutWrite = NULL;
-    HANDLE hOutputThread = NULL, hInputThread = NULL;
+    HANDLE hOutputThread = NULL, hInputThread = NULL, hResizeThread = NULL;
     SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
     STARTUPINFOEXW si = {0};
     PROCESS_INFORMATION pi = {0};
@@ -219,6 +247,7 @@ int wmain(int argc, wchar_t *argv[])
     hKernel = GetModuleHandleW(L"kernel32.dll");
     pCreatePseudoConsole = (CreatePseudoConsoleFunc)GetProcAddress(hKernel, "CreatePseudoConsole");
     pClosePseudoConsole = (ClosePseudoConsoleFunc)GetProcAddress(hKernel, "ClosePseudoConsole");
+    g_pResizePseudoConsole = (ResizePseudoConsoleFunc)GetProcAddress(hKernel, "ResizePseudoConsole");
 
     if (!pCreatePseudoConsole || !pClosePseudoConsole)
     {
@@ -241,7 +270,7 @@ int wmain(int argc, wchar_t *argv[])
     consoleSize = GetConsoleSize();
 
     /* Create pseudo console */
-    hr = pCreatePseudoConsole(consoleSize, hPipeInRead, hPipeOutWrite, 0, &hPC);
+    hr = pCreatePseudoConsole(consoleSize, hPipeInRead, hPipeOutWrite, 0, &g_hPC);
     if (FAILED(hr))
     {
         fwprintf(stderr, L"CreatePseudoConsole failed: 0x%08lx\n", hr);
@@ -254,13 +283,13 @@ int wmain(int argc, wchar_t *argv[])
     if (!attrList)
     {
         fwprintf(stderr, L"Memory allocation failed\n");
-        pClosePseudoConsole(hPC);
+        pClosePseudoConsole(g_hPC);
         return 1;
     }
     
     InitializeProcThreadAttributeList(attrList, 1, 0, &attrListSize);
     UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                              hPC, sizeof(HPCON), NULL, NULL);
+                              g_hPC, sizeof(HPCON), NULL, NULL);
 
     si.StartupInfo.cb = sizeof(STARTUPINFOEXW);
     si.lpAttributeList = attrList;
@@ -271,7 +300,7 @@ int wmain(int argc, wchar_t *argv[])
                         (LPSTARTUPINFOW)&si, &pi))
     {
         fwprintf(stderr, L"CreateProcess failed: %lu\nCommand: %s\n", GetLastError(), szCmdLine);
-        pClosePseudoConsole(hPC);
+        pClosePseudoConsole(g_hPC);
         free(attrList);
         return 1;
     }
@@ -338,9 +367,10 @@ int wmain(int argc, wchar_t *argv[])
     GetConsoleMode(hStdin, &dwOrigConsoleMode);
     SetConsoleMode(hStdin, ENABLE_VIRTUAL_TERMINAL_INPUT);
 
-    /* Start I/O threads */
+    /* Start I/O and resize threads */
     hOutputThread = CreateThread(NULL, 0, OutputThread, NULL, 0, NULL);
     hInputThread = CreateThread(NULL, 0, InputThread, NULL, 0, NULL);
+    hResizeThread = CreateThread(NULL, 0, ResizeThread, NULL, 0, NULL);
 
     /* Wait for SSH process to exit */
     WaitForSingleObject(pi.hProcess, INFINITE);
@@ -356,6 +386,7 @@ int wmain(int argc, wchar_t *argv[])
     /* Wait for threads */
     WaitForSingleObject(hOutputThread, 1000);
     WaitForSingleObject(hInputThread, 1000);
+    WaitForSingleObject(hResizeThread, 1000);
 
     /* Restore console mode */
     SetConsoleMode(hStdin, dwOrigConsoleMode);
@@ -363,13 +394,14 @@ int wmain(int argc, wchar_t *argv[])
     /* Cleanup */
     CloseHandle(hOutputThread);
     CloseHandle(hInputThread);
+    CloseHandle(hResizeThread);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     CloseHandle(hPipeInWrite);
     CloseHandle(hPipeOutRead);
     DeleteProcThreadAttributeList(attrList);
     free(attrList);
-    pClosePseudoConsole(hPC);
+    pClosePseudoConsole(g_hPC);
 
     /* Final cleanup - ensure password is cleared even if prompt was never detected */
     SecureZeroMemory(szPassword, sizeof(szPassword));

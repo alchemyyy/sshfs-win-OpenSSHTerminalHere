@@ -395,36 +395,59 @@ static void BuildFullRemotePath(
 }
 
 /**
- * Get path to sshfs-ssh-launcher.exe (bundled with sshfs-ctx)
+ * Get path to sshfs-ssh-askpass.exe (bundled with sshfs-ctx)
  */
-static BOOL GetLauncherPath(LPWSTR pszPath, DWORD cchPath)
+static BOOL GetAskpassPath(LPWSTR pszPath, DWORD cchPath)
 {
     WCHAR szModulePath[MAX_PATH];
-    
-    /* Get the directory where sshfs-ssh.exe is located */
+
     if (GetModuleFileNameW(NULL, szModulePath, MAX_PATH))
     {
         WCHAR *pLastSlash = wcsrchr(szModulePath, L'\\');
         if (pLastSlash)
         {
             *pLastSlash = L'\0';
-            StringCchPrintfW(pszPath, cchPath, L"%s\\sshfs-ssh-launcher.exe", szModulePath);
+            StringCchPrintfW(pszPath, cchPath, L"%s\\sshfs-ssh-askpass.exe", szModulePath);
             if (GetFileAttributesW(pszPath) != INVALID_FILE_ATTRIBUTES)
                 return TRUE;
         }
     }
-    
+
     return FALSE;
 }
 
 /**
- * Launch SSH terminal using Windows OpenSSH via ConPTY launcher
+ * Find ssh.exe - try Windows OpenSSH first
+ */
+static BOOL FindSSH(LPWSTR pszPath, DWORD cchPath)
+{
+    WCHAR szSystemPath[MAX_PATH];
+
+    if (GetSystemDirectoryW(szSystemPath, MAX_PATH))
+    {
+        StringCchPrintfW(pszPath, cchPath, L"%s\\OpenSSH\\ssh.exe", szSystemPath);
+        if (GetFileAttributesW(pszPath) != INVALID_FILE_ATTRIBUTES)
+            return TRUE;
+    }
+
+    if (GetSystemDirectoryW(szSystemPath, MAX_PATH))
+    {
+        StringCchPrintfW(pszPath, cchPath, L"%s\\ssh.exe", szSystemPath);
+        if (GetFileAttributesW(pszPath) != INVALID_FILE_ATTRIBUTES)
+            return TRUE;
+    }
+
+    StringCchCopyW(pszPath, cchPath, L"ssh.exe");
+    return TRUE;
+}
+
+/**
+ * Launch SSH terminal directly using Windows OpenSSH
  *
- * Uses sshfs-ssh-launcher.exe which:
- * - Creates a ConPTY (pseudo-console) for proper terminal emulation
- * - Launches ssh.exe attached to the ConPTY
- * - Handles password prompt if credentials are stored
- * - Properly handles Ctrl+C and all terminal signals
+ * Launches ssh.exe directly in its own console window (no ConPTY middleman).
+ * For password auth, uses SSH_ASKPASS mechanism with sshfs-ssh-askpass.exe.
+ * This gives native terminal behavior: resize, Ctrl+C, VT sequences all
+ * handled by the console itself.
  */
 static BOOL LaunchSSHTerminal(
     LPCWSTR pszUser,
@@ -433,21 +456,21 @@ static BOOL LaunchSSHTerminal(
     LPCWSTR pszRemotePath,
     MountType mountType)
 {
-    WCHAR szLauncherPath[MAX_PATH];
+    WCHAR szSSHPath[MAX_PATH];
+    WCHAR szAskpassPath[MAX_PATH];
     WCHAR szPassword[256] = {0};
     WCHAR szCmdLine[MAX_PATH * 8];
-    WCHAR szTarget[512];
+    WCHAR szTitle[512];
     WCHAR szRemoteCmd[MAX_PATH * 2];
     STARTUPINFOW si = {0};
     PROCESS_INFORMATION pi = {0};
     BOOL bResult;
-    
-    /* Find the launcher */
-    if (!GetLauncherPath(szLauncherPath, MAX_PATH))
+    BOOL bHasPassword = FALSE;
+
+    /* Find ssh.exe */
+    if (!FindSSH(szSSHPath, MAX_PATH))
     {
-        MessageBoxW(NULL, 
-            L"Could not find sshfs-ssh-launcher.exe.\n\n"
-            L"Please ensure sshfs-ssh-launcher.exe is in the same directory as sshfs-ssh.exe.",
+        MessageBoxW(NULL, L"Could not find ssh.exe.",
             L"SSHFS-Win - SSH Terminal", MB_OK | MB_ICONERROR);
         return FALSE;
     }
@@ -455,19 +478,25 @@ static BOOL LaunchSSHTerminal(
     /* For password-based mounts, try to read stored credential */
     if (mountType == MOUNT_TYPE_PASSWORD || mountType == MOUNT_TYPE_PASSWORD_ROOT)
     {
-        GetStoredPassword(pszUser, pszHost, pszPort, szPassword, 256);
+        bHasPassword = GetStoredPassword(pszUser, pszHost, pszPort, szPassword, 256);
     }
-    /* For key-based mounts, OpenSSH will use ~/.ssh/ keys automatically */
 
-    /* Build target: user@host or user@host:port */
-    if (pszPort && pszPort[0])
-        StringCchPrintfW(szTarget, 512, L"%s@%s:%s", pszUser, pszHost, pszPort);
-    else
-        StringCchPrintfW(szTarget, 512, L"%s@%s", pszUser, pszHost);
+    /* If we have a password, find the askpass helper */
+    if (bHasPassword)
+    {
+        if (!GetAskpassPath(szAskpassPath, MAX_PATH))
+        {
+            MessageBoxW(NULL,
+                L"Could not find sshfs-ssh-askpass.exe.\n\n"
+                L"Please ensure sshfs-ssh-askpass.exe is in the same directory as sshfs-ssh.exe.",
+                L"SSHFS-Win - SSH Terminal", MB_OK | MB_ICONERROR);
+            SecureZeroMemory(szPassword, sizeof(szPassword));
+            return FALSE;
+        }
+    }
 
     /* Build remote command: cd to path and start login shell */
     {
-        /* First, sanitize the path - remove any quotes that might break things */
         WCHAR szCleanPath[MAX_PATH * 2];
         WCHAR *src = (WCHAR*)pszRemotePath;
         WCHAR *dst = szCleanPath;
@@ -480,65 +509,30 @@ static BOOL LaunchSSHTerminal(
         *dst = L'\0';
 
         if (szCleanPath[0] == L'\0' || wcscmp(szCleanPath, L"~") == 0)
-        {
             StringCchCopyW(szRemoteCmd, MAX_PATH * 2, L"cd ~; exec $SHELL");
-        }
         else if (szCleanPath[0] == L'/')
-        {
             StringCchPrintfW(szRemoteCmd, MAX_PATH * 2, L"cd '%s'; exec $SHELL", szCleanPath);
-        }
         else if (szCleanPath[0] == L'~')
-        {
-            /* Path like ~/something or ~/../../.. */
             StringCchPrintfW(szRemoteCmd, MAX_PATH * 2, L"cd %s; exec $SHELL", szCleanPath);
-        }
         else
-        {
             StringCchPrintfW(szRemoteCmd, MAX_PATH * 2, L"cd '%s'; exec $SHELL", szCleanPath);
-        }
     }
 
-    /* Create pipe for secure password passing (not visible in process list) */
-    HANDLE hPipeRead = NULL, hPipeWrite = NULL;
-    SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};  /* Inheritable */
-
-    if (szPassword[0])
-    {
-        if (!CreatePipe(&hPipeRead, &hPipeWrite, &sa, 0))
-        {
-            MessageBoxW(NULL, L"Failed to create password pipe", L"SSHFS-Win", MB_OK | MB_ICONERROR);
-            return FALSE;
-        }
-        /* Make write handle non-inheritable (only read handle goes to child) */
-        SetHandleInformation(hPipeWrite, HANDLE_FLAG_INHERIT, 0);
-    }
-
-    /* Build command line for launcher:
-     * sshfs-ssh-launcher.exe user@host[:port] pipe_handle ["remote_command"]
-     * Password is passed via inherited pipe, not command line (security)
-     */
-    if (szPassword[0])
-    {
-        if (szRemoteCmd[0])
-            StringCchPrintfW(szCmdLine, MAX_PATH * 8,
-                L"\"%s\" \"%s\" %llu \"%s\"",
-                szLauncherPath, szTarget, (ULONGLONG)(ULONG_PTR)hPipeRead, szRemoteCmd);
-        else
-            StringCchPrintfW(szCmdLine, MAX_PATH * 8,
-                L"\"%s\" \"%s\" %llu",
-                szLauncherPath, szTarget, (ULONGLONG)(ULONG_PTR)hPipeRead);
-    }
+    /* Build SSH command line */
+    if (pszPort && pszPort[0])
+        StringCchPrintfW(szCmdLine, MAX_PATH * 8,
+            L"\"%s\" -t -p %s %s@%s \"%s\"",
+            szSSHPath, pszPort, pszUser, pszHost, szRemoteCmd);
     else
-    {
-        if (szRemoteCmd[0])
-            StringCchPrintfW(szCmdLine, MAX_PATH * 8,
-                L"\"%s\" \"%s\" 0 \"%s\"",
-                szLauncherPath, szTarget, szRemoteCmd);
-        else
-            StringCchPrintfW(szCmdLine, MAX_PATH * 8,
-                L"\"%s\" \"%s\" 0",
-                szLauncherPath, szTarget);
-    }
+        StringCchPrintfW(szCmdLine, MAX_PATH * 8,
+            L"\"%s\" -t %s@%s \"%s\"",
+            szSSHPath, pszUser, pszHost, szRemoteCmd);
+
+    /* Console title */
+    if (pszPort && pszPort[0])
+        StringCchPrintfW(szTitle, 512, L"SSH: %s@%s:%s", pszUser, pszHost, pszPort);
+    else
+        StringCchPrintfW(szTitle, 512, L"SSH: %s@%s", pszUser, pszHost);
 
 #if DEBUG_SSH_CMD
     {
@@ -554,47 +548,45 @@ static BOOL LaunchSSHTerminal(
             WriteFile(hFile, szUtf8, (DWORD)strlen(szUtf8), &written, NULL);
             CloseHandle(hFile);
             ShellExecuteW(NULL, L"open", L"notepad.exe", szTempFile, NULL, SW_SHOW);
-            Sleep(500);  /* Give notepad time to open */
+            Sleep(500);
         }
     }
 #endif
 
-    /* Launch the ConPTY-based SSH launcher in a new console */
+    /* Set SSH_ASKPASS environment for password auth */
+    if (bHasPassword)
+    {
+        SetEnvironmentVariableW(L"SSH_ASKPASS", szAskpassPath);
+        SetEnvironmentVariableW(L"SSH_ASKPASS_REQUIRE", L"force");
+        SetEnvironmentVariableW(L"SSHFS_PASSWORD", szPassword);
+    }
+
+    /* Launch ssh.exe directly in a new console */
     si.cb = sizeof(si);
-    bResult = CreateProcessW(NULL, szCmdLine, NULL, NULL, TRUE,  /* TRUE = inherit handles */
+    si.lpTitle = szTitle;
+    bResult = CreateProcessW(NULL, szCmdLine, NULL, NULL, FALSE,
         CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi);
+
+    /* Clear environment immediately */
+    if (bHasPassword)
+    {
+        SetEnvironmentVariableW(L"SSH_ASKPASS", NULL);
+        SetEnvironmentVariableW(L"SSH_ASKPASS_REQUIRE", NULL);
+        SetEnvironmentVariableW(L"SSHFS_PASSWORD", NULL);
+    }
+    SecureZeroMemory(szPassword, sizeof(szPassword));
 
     if (bResult)
     {
-        /* Write password to pipe, then close handles */
-        if (szPassword[0] && hPipeWrite)
-        {
-            char szPasswordA[256];
-            DWORD written;
-            WideCharToMultiByte(CP_UTF8, 0, szPassword, -1, szPasswordA, 256, NULL, NULL);
-            WriteFile(hPipeWrite, szPasswordA, (DWORD)strlen(szPasswordA) + 1, &written, NULL);
-            SecureZeroMemory(szPasswordA, sizeof(szPasswordA));
-            CloseHandle(hPipeWrite);
-        }
-        if (hPipeRead) CloseHandle(hPipeRead);  /* Close our copy, child has its own */
-
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-
-        /* Clear password from memory */
-        SecureZeroMemory(szPassword, sizeof(szPassword));
         return TRUE;
     }
 
-    /* Cleanup on failure */
-    if (hPipeRead) CloseHandle(hPipeRead);
-    if (hPipeWrite) CloseHandle(hPipeWrite);
-    SecureZeroMemory(szPassword, sizeof(szPassword));
-
     DWORD dwError = GetLastError();
     WCHAR szError[512];
-    StringCchPrintfW(szError, 512, 
-        L"Failed to launch SSH terminal.\nError code: %lu\n\nCommand: %s", 
+    StringCchPrintfW(szError, 512,
+        L"Failed to launch SSH terminal.\nError code: %lu\n\nCommand: %s",
         dwError, szCmdLine);
     MessageBoxW(NULL, szError, L"SSHFS-Win - SSH Terminal", MB_OK | MB_ICONERROR);
 
