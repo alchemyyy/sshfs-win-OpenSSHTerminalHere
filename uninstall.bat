@@ -25,7 +25,7 @@ echo ============================================
 echo.
 
 :: Step 1: Unregister the shell extension
-echo [1/2] Unregistering shell extension...
+echo [1/3] Unregistering shell extension...
 if exist "%TARGET_DIR%\sshfs-ctx.dll" (
     regsvr32 /s /u "%TARGET_DIR%\sshfs-ctx.dll"
 ) else (
@@ -38,12 +38,21 @@ if exist "%TARGET_DIR%\sshfs-ctx.dll" (
 )
 echo   OK
 
-:: Step 2: Remove files
-echo [2/2] Removing files...
+:: Step 2: Stop Explorer to release DLL
+echo [2/3] Stopping Explorer...
+taskkill /f /im explorer.exe >nul 2>&1
+echo   OK
+
+:: Step 3: Remove files
+echo [3/3] Removing files...
 del /f "%TARGET_DIR%\sshfs-ctx.dll" >nul 2>&1
 del /f "%TARGET_DIR%\sshfs-ssh.exe" >nul 2>&1
 del /f "%TARGET_DIR%\sshfs-ssh-launcher.exe" >nul 2>&1
 echo   OK
+
+:: Restart Explorer
+echo Restarting Explorer...
+start explorer.exe
 
 echo.
 echo ============================================
