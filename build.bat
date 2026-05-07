@@ -11,7 +11,8 @@ set "SRC_DIR=%SCRIPT_DIR%src"
 set "OUT_DIR=%SCRIPT_DIR%bin"
 
 :: Skip setup if already in a Developer Command Prompt
-where cl.exe >nul 2>&1 && goto :build
+:: (cl.exe alone isn't enough — INCLUDE/LIB must be set too)
+where cl.exe >nul 2>&1 && if defined INCLUDE goto :build
 
 :: Find Visual Studio using vswhere
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -30,9 +31,13 @@ if "%VS_PATH%"=="" (
 )
 
 :: Initialize MSVC environment
-call "%VS_PATH%\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
+call "%VS_PATH%\VC\Auxiliary\Build\vcvarsall.bat" x64
 if errorlevel 1 (
     echo ERROR: Failed to initialize MSVC environment.
+    exit /b 1
+)
+if not defined INCLUDE (
+    echo ERROR: MSVC environment did not set INCLUDE. Check vcvarsall output above.
     exit /b 1
 )
 
